@@ -14,6 +14,7 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
+	"github.com/tmc/langchaingo/llms"
 
 	"github.com/tuannvm/slack-mcp-client/internal/common"
 	customErrors "github.com/tuannvm/slack-mcp-client/internal/common/errors"
@@ -38,7 +39,7 @@ type Client struct {
 	llmMCPBridge    *handlers.LLMMCPBridge
 	llmRegistry     *llm.ProviderRegistry // LLM provider registry
 	cfg             *config.Config        // Holds the application configuration
-	messageHistory  map[string][]Message
+	messageHistory  map[string][]llms.MessageContent
 	historyLimit    int
 	discoveredTools map[string]common.ToolInfo
 	llmsTools       []llms.Tool
@@ -157,7 +158,7 @@ func NewClient(botToken, appToken string, stdLogger *logging.Logger, mcpClients 
 		llmMCPBridge:    llmMCPBridge,
 		llmRegistry:     registry,
 		cfg:             cfg,
-		messageHistory:  make(map[string][]Message),
+		messageHistory:  make(map[string][]llms.MessageContent),
 		historyLimit:    50, // Store up to 50 messages per channel
 		discoveredTools: discoveredTools,
 		llmsTools:       llmsTools,
@@ -233,17 +234,16 @@ func (c *Client) handleEventMessage(event slackevents.EventsAPIEvent) {
 }
 
 // addToHistory adds a message to the channel history
-func (c *Client) addToHistory(channelID, role, content string) {
+func (c *Client) addToHistory(channelID string, role llms.ChatMessageType, parts ...llms.ContentPart) {
 	history, exists := c.messageHistory[channelID]
 	if !exists {
-		history = []Message{}
+		history = []llms.MessageContent{}
 	}
 
 	// Add the new message
-	message := Message{
-		Role:      role,
-		Content:   content,
-		Timestamp: time.Now(),
+	message := llms.MessageContent{
+		Role:  role,
+		Parts: parts,
 	}
 	history = append(history, message)
 
