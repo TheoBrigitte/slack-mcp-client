@@ -41,18 +41,12 @@ type Client struct {
 	messageHistory  map[string][]Message
 	historyLimit    int
 	discoveredTools map[string]common.ToolInfo
-}
-
-// Message represents a message in the conversation history
-type Message struct {
-	Role      string    // "user", "assistant", or "tool"
-	Content   string    // The message content
-	Timestamp time.Time // When the message was sent/received
+	llmsTools       []llms.Tool
 }
 
 // NewClient creates a new Slack client instance.
 func NewClient(botToken, appToken string, stdLogger *logging.Logger, mcpClients map[string]*mcp.Client,
-	discoveredTools map[string]common.ToolInfo, cfg *config.Config) (*Client, error) {
+	discoveredTools map[string]common.ToolInfo, llmsTools []llms.Tool, cfg *config.Config) (*Client, error) {
 	if botToken == "" {
 		return nil, fmt.Errorf("SLACK_BOT_TOKEN must be set")
 	}
@@ -114,7 +108,7 @@ func NewClient(botToken, appToken string, stdLogger *logging.Logger, mcpClients 
 	slackLogger.Printf("Available tools (%d):", len(discoveredTools))
 	for toolName, toolInfo := range discoveredTools {
 		slackLogger.Printf("- %s (Desc: %s, Schema: %v, Server: %s)",
-			toolName, toolInfo.Description, toolInfo.InputSchema, toolInfo.ServerName)
+			toolName, toolInfo.Tool.Function.Description, toolInfo.Tool.Function.Parameters, toolInfo.ServerName)
 	}
 
 	// Create a map of raw clients to pass to the bridge
@@ -166,6 +160,7 @@ func NewClient(botToken, appToken string, stdLogger *logging.Logger, mcpClients 
 		messageHistory:  make(map[string][]Message),
 		historyLimit:    50, // Store up to 50 messages per channel
 		discoveredTools: discoveredTools,
+		llmsTools:       llmsTools,
 	}, nil
 }
 
