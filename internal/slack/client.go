@@ -25,6 +25,8 @@ import (
 	"github.com/tuannvm/slack-mcp-client/internal/slack/formatter"
 )
 
+const thinkingMessage = "Thinking..."
+
 // Client represents the Slack client application.
 type Client struct {
 	logger          *logging.Logger // Structured logger
@@ -303,7 +305,7 @@ func (c *Client) handleUserPrompt(userPrompt, channelID, threadTS string) {
 	c.addToHistory(channelID, "user", userPrompt) // Add user message to history
 
 	// Show a temporary "typing" indicator
-	if _, _, err := c.api.PostMessage(channelID, slack.MsgOptionText("Thinking...", false), slack.MsgOptionTS(threadTS)); err != nil {
+	if _, _, err := c.api.PostMessage(channelID, slack.MsgOptionText(thinkingMessage, false), slack.MsgOptionTS(threadTS)); err != nil {
 		c.logger.ErrorKV("Error posting typing indicator", "error", err)
 	}
 
@@ -540,9 +542,11 @@ func (c *Client) postMessage(channelID, threadTS, text string) {
 		ChannelID: channelID,
 		Limit:     10,
 	})
-	if err == nil && history != nil {
+	if err != nil {
+		c.logger.ErrorKV("Error fetching conversation history", "channel", channelID, "error", err)
+	} else if history != nil {
 		for _, msg := range history.Messages {
-			if msg.User == c.botUserID && msg.Text == "..." {
+			if msg.User == c.botUserID && msg.Text == thinkingMessage {
 				_, _, err := c.api.DeleteMessage(channelID, msg.Timestamp)
 				if err != nil {
 					c.logger.ErrorKV("Error deleting typing indicator message", "error", err)
