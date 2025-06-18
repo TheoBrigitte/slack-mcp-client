@@ -272,13 +272,13 @@ func (c *Client) handleUserPrompt(userPrompt, channelID, threadTS string) {
 	c.addToHistory(channelID, llms.ChatMessageTypeHuman, llms.TextPart(userPrompt)) // Add user message to history
 
 	// Show a temporary "typing" indicator
-	_, respTimestamp, err := c.api.PostMessage(channelID, slack.MsgOptionText(thinkingMessage, false), slack.MsgOptionTS(threadTS))
+	_, messageTimestamp, err := c.api.PostMessage(channelID, slack.MsgOptionText(thinkingMessage, false))
 	if err != nil {
 		c.logger.ErrorKV("Error posting typing indicator", "error", err)
 	}
 
 	// Process the LLM response through the MCP pipeline
-	c.processLLMResponseAndReply(channelID, threadTS, respTimestamp)
+	c.processLLMResponseAndReply(channelID, messageTimestamp)
 }
 
 // callLLM generates a text completion using the specified provider from the registry.
@@ -325,7 +325,7 @@ func (c *Client) answer(channelID, threadTS, respTimestamp string, response stri
 
 // processLLMResponseAndReply processes the LLM response, handles tool results with re-prompting, and sends the final reply.
 // Incorporates logic previously in LLMClient.ProcessToolResponse.
-func (c *Client) processLLMResponseAndReply(channelID, threadTS, respTimestamp string) {
+func (c *Client) processLLMResponseAndReply(channelID, messageTimestamp string) {
 	providerName := c.cfg.LLMProvider
 
 	for {
@@ -335,7 +335,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS, respTimestamp s
 		llmResponse, err := c.callLLM(providerName, contextHistory)
 		if err != nil {
 			c.logger.ErrorKV("Error from LLM provider", "provider", providerName, "error", err)
-			c.postMessage(channelID, threadTS, respTimestamp, fmt.Sprintf("Sorry, I encountered an error with the LLM provider ('%s'): %v", providerName, err))
+			c.postMessage(channelID, "", messageTimestamp, fmt.Sprintf("Sorry, I encountered an error with the LLM provider ('%s'): %v", providerName, err))
 			return
 		}
 
@@ -353,7 +353,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS, respTimestamp s
 			}
 			c.addToHistory(channelID, llms.ChatMessageTypeAI, llms.TextPart(llmResponse.Content))
 
-			c.answer(channelID, threadTS, respTimestamp, llmResponse.Content)
+			c.answer(channelID, "", messageTimestamp, llmResponse.Content)
 			return
 		}
 
@@ -371,9 +371,16 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS, respTimestamp s
 		defer cancel()
 
 		for _, toolCall := range llmResponse.ToolCalls {
-			message := fmt.Sprintf("%s %s - calling tool `%s` with arguments: %s", thinkingMessage, llmResponse.Content, toolCall.FunctionCall.Name, toolCall.FunctionCall.Arguments)
+			messageParts := []string{}
+			if llmResponse.Content != "" {
+				messageParts = append(messageParts, llmResponse.Content)
+			}
+			toolCallMessage := fmt.Sprintf("calling tool `%s` with arguments: `%s`", toolCall.FunctionCall.Name, toolCall.FunctionCall.Arguments)
+			messageParts = append(messageParts, toolCallMessage)
+
+			message := fmt.Sprintf("%s %s", thinkingMessage, strings.Join(messageParts, " - "))
 			fmt.Println("Tool call message:", message)
-			c.answer(channelID, threadTS, respTimestamp, message)
+			c.answer(channelID, messageTimestamp, "", message)
 
 			// --- Process Tool Response (Logic from LLMClient.ProcessToolResponse) ---
 			// Process the response through the bridge
@@ -388,7 +395,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS, respTimestamp s
 			if err != nil {
 				c.logger.ErrorKV("Tool processing error", "error", err)
 				finalResponse := fmt.Sprintf("Sorry, I encountered an error while trying to use a tool: %v", err)
-				c.answer(channelID, threadTS, respTimestamp, finalResponse)
+				c.answer(channelID, "", messageTimestamp, finalResponse)
 				return
 			}
 
@@ -426,40 +433,39 @@ func (c *Client) postMessage(channelID, threadTS, respTimestamp, text string) {
 	// Detect message type and format accordingly
 	messageType := formatter.DetectMessageType(text)
 	c.logger.DebugKV("Detected message type", "type", messageType, "length", len(text))
+	messageType = formatter.PlainText
 
 	var msgOptions []slack.MsgOption
+	var formattedText = text
+
+	options := formatter.DefaultOptions()
 
 	switch messageType {
 	case formatter.JSONBlock:
 		// Message is already in Block Kit JSON format
-		options := formatter.DefaultOptions()
 		options.Format = formatter.BlockFormat
-		options.ThreadTS = threadTS
-		msgOptions = formatter.FormatMessage(text, options)
-
+		formattedText = text
 	case formatter.StructuredData:
 		// Convert structured data to Block Kit format
-		formattedText := formatter.FormatStructuredData(text)
-		options := formatter.DefaultOptions()
+		formattedText = formatter.FormatStructuredData(text)
 		options.Format = formatter.BlockFormat
-		options.ThreadTS = threadTS
-		msgOptions = formatter.FormatMessage(formattedText, options)
-
-	case formatter.MarkdownText, formatter.PlainText:
-		// Apply Markdown formatting and use default text formatting
-		formattedText := formatter.FormatMarkdown(text)
-		options := formatter.DefaultOptions()
-		options.ThreadTS = threadTS
-		msgOptions = formatter.FormatMessage(formattedText, options)
+	case formatter.MarkdownText:
+		formattedText = formatter.FormatMarkdown(text)
 	}
+
+	if threadTS != "" {
+		options.ThreadTS = threadTS
+	}
+	msgOptions = formatter.FormatMessage(formattedText, options)
 
 	// Send the message
 	var err error
-	if respTimestamp != "" {
-		_, _, _, err = c.api.UpdateMessage(channelID, respTimestamp, msgOptions...)
-	} else {
+	if threadTS != "" {
 		_, _, err = c.api.PostMessage(channelID, msgOptions...)
+	} else {
+		_, _, _, err = c.api.UpdateMessage(channelID, respTimestamp, msgOptions...)
 	}
+
 	if err != nil {
 		c.logger.ErrorKV("Error posting message to channel", "channel", channelID, "error", err, "messageType", messageType)
 
@@ -478,11 +484,12 @@ func (c *Client) postMessage(channelID, threadTS, respTimestamp, text string) {
 
 			// Try sending with plain text format
 			var fallbackErr error
-			if respTimestamp != "" {
-				_, _, _, fallbackErr = c.api.UpdateMessage(channelID, respTimestamp, fallbackOptions...)
-			} else {
+			if threadTS != "" {
 				_, _, fallbackErr = c.api.PostMessage(channelID, fallbackOptions...)
+			} else {
+				_, _, _, fallbackErr = c.api.UpdateMessage(channelID, respTimestamp, fallbackOptions...)
 			}
+
 			if fallbackErr != nil {
 				c.logger.ErrorKV("Error posting fallback message to channel", "channel", channelID, "error", fallbackErr)
 			}
