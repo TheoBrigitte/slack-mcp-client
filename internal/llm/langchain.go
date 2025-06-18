@@ -3,6 +3,7 @@ package llm
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 
 	"github.com/tmc/langchaingo/llms"
@@ -14,6 +15,9 @@ import (
 const (
 	langchainProviderName = "langchain"
 )
+
+//go:embed system_prompt.txt
+var systemPrompt string
 
 type Message llms.MessageContent
 
@@ -115,6 +119,14 @@ func (p *LangChainProvider) GenerateCompletion(ctx context.Context, messages []l
 	}
 
 	callOptions := p.buildOptions(options)
+
+	systemMessage := llms.MessageContent{
+		Role:  llms.ChatMessageTypeSystem,
+		Parts: []llms.ContentPart{llms.TextContent{Text: systemPrompt}},
+	}
+
+	// Prepend the system message to the messages
+	messages = append([]llms.MessageContent{systemMessage}, messages...)
 
 	resp, err := p.llm.GenerateContent(ctx, messages, callOptions...)
 	if err != nil {
