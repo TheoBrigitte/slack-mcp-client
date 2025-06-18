@@ -272,12 +272,13 @@ func (c *Client) handleUserPrompt(userPrompt, channelID, threadTS string) {
 	c.addToHistory(channelID, llms.ChatMessageTypeHuman, llms.TextPart(userPrompt)) // Add user message to history
 
 	// Show a temporary "typing" indicator
-	if _, _, err := c.api.PostMessage(channelID, slack.MsgOptionText(thinkingMessage, false), slack.MsgOptionTS(threadTS)); err != nil {
+	_, respTimestamp, err := c.api.PostMessage(channelID, slack.MsgOptionText(thinkingMessage, false), slack.MsgOptionTS(threadTS))
+	if err != nil {
 		c.logger.ErrorKV("Error posting typing indicator", "error", err)
 	}
 
 	// Process the LLM response through the MCP pipeline
-	c.processLLMResponseAndReply(channelID, threadTS)
+	c.processLLMResponseAndReply(channelID, threadTS, respTimestamp)
 }
 
 // callLLM generates a text completion using the specified provider from the registry.
@@ -314,17 +315,17 @@ func (c *Client) callLLM(providerName string, messages []llms.MessageContent) (*
 	return resp, nil
 }
 
-func (c *Client) answer(channelID, threadTS string, response string) {
+func (c *Client) answer(channelID, threadTS, respTimestamp string, response string) {
 	if response == "" {
-		c.postMessage(channelID, threadTS, "(LLM returned an empty response)")
-	} else {
-		c.postMessage(channelID, threadTS, response)
+		response = "(LLM returned an empty response)"
 	}
+
+	c.postMessage(channelID, threadTS, respTimestamp, response)
 }
 
 // processLLMResponseAndReply processes the LLM response, handles tool results with re-prompting, and sends the final reply.
 // Incorporates logic previously in LLMClient.ProcessToolResponse.
-func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
+func (c *Client) processLLMResponseAndReply(channelID, threadTS, respTimestamp string) {
 	providerName := c.cfg.LLMProvider
 
 	for {
@@ -334,7 +335,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 		llmResponse, err := c.callLLM(providerName, contextHistory)
 		if err != nil {
 			c.logger.ErrorKV("Error from LLM provider", "provider", providerName, "error", err)
-			c.postMessage(channelID, threadTS, fmt.Sprintf("Sorry, I encountered an error with the LLM provider ('%s'): %v", providerName, err))
+			c.postMessage(channelID, threadTS, respTimestamp, fmt.Sprintf("Sorry, I encountered an error with the LLM provider ('%s'): %v", providerName, err))
 			return
 		}
 
@@ -352,7 +353,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 			}
 			c.addToHistory(channelID, llms.ChatMessageTypeAI, llms.TextPart(llmResponse.Content))
 
-			c.answer(channelID, threadTS, llmResponse.Content)
+			c.answer(channelID, threadTS, respTimestamp, llmResponse.Content)
 			return
 		}
 
@@ -370,6 +371,10 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 		defer cancel()
 
 		for _, toolCall := range llmResponse.ToolCalls {
+			message := fmt.Sprintf("%s %s - calling tool `%s` with arguments: %s", thinkingMessage, llmResponse.Content, toolCall.FunctionCall.Name, toolCall.FunctionCall.Arguments)
+			fmt.Println("Tool call message:", message)
+			c.answer(channelID, threadTS, respTimestamp, message)
+
 			// --- Process Tool Response (Logic from LLMClient.ProcessToolResponse) ---
 			// Process the response through the bridge
 			args := make(map[string]interface{})
@@ -383,7 +388,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 			if err != nil {
 				c.logger.ErrorKV("Tool processing error", "error", err)
 				finalResponse := fmt.Sprintf("Sorry, I encountered an error while trying to use a tool: %v", err)
-				c.answer(channelID, threadTS, finalResponse)
+				c.answer(channelID, threadTS, respTimestamp, finalResponse)
 				return
 			}
 
@@ -412,30 +417,10 @@ func truncateForLog(s string, maxLen int) string {
 }
 
 // postMessage sends a message back to Slack, replying in a thread if threadTS is provided.
-func (c *Client) postMessage(channelID, threadTS, text string) {
+func (c *Client) postMessage(channelID, threadTS, respTimestamp, text string) {
 	if text == "" {
 		c.logger.WarnKV("Attempted to send empty message, skipping", "channel", channelID)
 		return
-	}
-
-	// Delete "typing" indicator messages if any
-	// This is a simplistic approach - more sophisticated approaches might track message IDs
-	history, err := c.api.GetConversationHistory(&slack.GetConversationHistoryParameters{
-		ChannelID: channelID,
-		Limit:     10,
-	})
-	if err != nil {
-		c.logger.ErrorKV("Error fetching conversation history", "channel", channelID, "error", err)
-	} else if history != nil {
-		for _, msg := range history.Messages {
-			if msg.User == c.botUserID && msg.Text == thinkingMessage {
-				_, _, err := c.api.DeleteMessage(channelID, msg.Timestamp)
-				if err != nil {
-					c.logger.ErrorKV("Error deleting typing indicator message", "error", err)
-				}
-				break // Just delete the most recent one
-			}
-		}
 	}
 
 	// Detect message type and format accordingly
@@ -469,7 +454,12 @@ func (c *Client) postMessage(channelID, threadTS, text string) {
 	}
 
 	// Send the message
-	_, _, err = c.api.PostMessage(channelID, msgOptions...)
+	var err error
+	if respTimestamp != "" {
+		_, _, _, err = c.api.UpdateMessage(channelID, respTimestamp, msgOptions...)
+	} else {
+		_, _, err = c.api.PostMessage(channelID, msgOptions...)
+	}
 	if err != nil {
 		c.logger.ErrorKV("Error posting message to channel", "channel", channelID, "error", err, "messageType", messageType)
 
@@ -487,7 +477,12 @@ func (c *Client) postMessage(channelID, threadTS, text string) {
 			}
 
 			// Try sending with plain text format
-			_, _, fallbackErr := c.api.PostMessage(channelID, fallbackOptions...)
+			var fallbackErr error
+			if respTimestamp != "" {
+				_, _, _, fallbackErr = c.api.UpdateMessage(channelID, respTimestamp, fallbackOptions...)
+			} else {
+				_, _, fallbackErr = c.api.PostMessage(channelID, fallbackOptions...)
+			}
 			if fallbackErr != nil {
 				c.logger.ErrorKV("Error posting fallback message to channel", "channel", channelID, "error", fallbackErr)
 			}
