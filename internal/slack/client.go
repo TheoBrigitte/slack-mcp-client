@@ -205,12 +205,16 @@ func (c *Client) handleEventMessage(event slackevents.EventsAPIEvent) {
 		innerEvent := event.InnerEvent
 		switch ev := innerEvent.Data.(type) {
 		case *slackevents.AppMentionEvent:
-			c.logger.InfoKV("Received app mention in channel", "channel", ev.Channel, "user", ev.User, "text", ev.Text)
+			timestamp := ev.ThreadTimeStamp
+			if timestamp == "" {
+				timestamp = ev.TimeStamp // Use the message timestamp if no thread
+			}
+			c.logger.InfoKV("Received app mention in channel", "channel", ev.Channel, "user", ev.User, "text", ev.Text, "timestamp", timestamp)
 			messageText := c.botMentionRgx.ReplaceAllString(ev.Text, "")
 			// Add to message history
-			c.addToHistory(ev.Channel, llms.ChatMessageTypeHuman, llms.TextPart(messageText))
+			c.addToHistory(timestamp, llms.ChatMessageTypeHuman, llms.TextPart(messageText))
 			// Use handleUserPrompt for app mentions too, for consistency
-			go c.handleUserPrompt(strings.TrimSpace(messageText), ev.Channel, ev.TimeStamp)
+			go c.handleUserPrompt(strings.TrimSpace(messageText), ev.Channel, timestamp)
 
 		case *slackevents.MessageEvent:
 			isDirectMessage := strings.HasPrefix(ev.Channel, "D")
@@ -219,13 +223,13 @@ func (c *Client) handleEventMessage(event slackevents.EventsAPIEvent) {
 			isBot := ev.BotID != "" || ev.SubType == "bot_message"
 
 			if isDirectMessage && isValidUser && isNotEdited && !isBot {
-				c.logger.InfoKV("Received direct message in channel", "channel", ev.Channel, "user", ev.User, "text", ev.Text)
-				// Add to message history
-				c.addToHistory(ev.Channel, llms.ChatMessageTypeHuman, llms.TextPart(ev.Text))
 				timestamp := ev.ThreadTimeStamp
 				if timestamp == "" {
 					timestamp = ev.TimeStamp // Use the message timestamp if no thread
 				}
+				c.logger.InfoKV("Received direct message in channel", "channel", ev.Channel, "user", ev.User, "text", ev.Text, "timestamp", timestamp)
+				// Add to message history
+				c.addToHistory(timestamp, llms.ChatMessageTypeHuman, llms.TextPart(ev.Text))
 				go c.handleUserPrompt(ev.Text, ev.Channel, timestamp) // Use goroutine to avoid blocking event loop
 			}
 
@@ -238,8 +242,8 @@ func (c *Client) handleEventMessage(event slackevents.EventsAPIEvent) {
 }
 
 // addToHistory adds a message to the channel history
-func (c *Client) addToHistory(channelID string, role llms.ChatMessageType, parts ...llms.ContentPart) {
-	history, exists := c.messageHistory[channelID]
+func (c *Client) addToHistory(threadTS string, role llms.ChatMessageType, parts ...llms.ContentPart) {
+	history, exists := c.messageHistory[threadTS]
 	if !exists {
 		history = []llms.MessageContent{}
 	}
@@ -256,15 +260,15 @@ func (c *Client) addToHistory(channelID string, role llms.ChatMessageType, parts
 		history = history[len(history)-c.historyLimit:]
 	}
 
-	c.messageHistory[channelID] = history
+	c.messageHistory[threadTS] = history
 }
 
 // getContextFromHistory builds a context string from message history
 //
 //nolint:unused // Reserved for future use
-func (c *Client) getContextFromHistory(channelID string) []llms.MessageContent {
-	c.logger.DebugKV("Built conversation context", "channel", channelID)
-	history := c.messageHistory[channelID]
+func (c *Client) getContextFromHistory(threadTS string) []llms.MessageContent {
+	c.logger.DebugKV("Built conversation context", "thread", threadTS)
+	history := c.messageHistory[threadTS]
 	return history
 }
 
@@ -273,7 +277,7 @@ func (c *Client) handleUserPrompt(userPrompt, channelID, threadTS string) {
 	// Determine the provider to use from config
 	c.logger.DebugKV("User prompt", "text", userPrompt)
 
-	c.addToHistory(channelID, llms.ChatMessageTypeHuman, llms.TextPart(userPrompt)) // Add user message to history
+	c.addToHistory(threadTS, llms.ChatMessageTypeHuman, llms.TextPart(userPrompt)) // Add user message to history
 
 	// Process the LLM response through the MCP pipeline
 	c.processLLMResponseAndReply(channelID, threadTS)
@@ -334,7 +338,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 		}
 
 		// Get context from history
-		contextHistory := c.getContextFromHistory(channelID)
+		contextHistory := c.getContextFromHistory(threadTS)
 		// Call LLM using the integrated logic
 		llmResponse, err := c.callLLM(providerName, contextHistory)
 		if err != nil {
@@ -355,7 +359,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 			if c.llmMCPBridge == nil {
 				c.logger.Warn("LLMMCPBridge is nil, skipping tool processing")
 			}
-			c.addToHistory(channelID, llms.ChatMessageTypeAI, llms.TextPart(llmResponse.Content))
+			c.addToHistory(threadTS, llms.ChatMessageTypeAI, llms.TextPart(llmResponse.Content))
 
 			c.answer(channelID, threadTS, messageTimestamp, llmResponse.Content)
 			return
@@ -368,7 +372,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 			parts = append(parts, toolCall)
 		}
 
-		c.addToHistory(channelID, llms.ChatMessageTypeAI, parts...)
+		c.addToHistory(threadTS, llms.ChatMessageTypeAI, parts...)
 
 		// Create a context with timeout for tool processing
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -414,7 +418,7 @@ func (c *Client) processLLMResponseAndReply(channelID, threadTS string) {
 				Name:       toolCall.FunctionCall.Name,
 				Content:    processedResponse,
 			}
-			c.addToHistory(channelID, llms.ChatMessageTypeTool, toolResponsePart)
+			c.addToHistory(threadTS, llms.ChatMessageTypeTool, toolResponsePart)
 		}
 	}
 }
