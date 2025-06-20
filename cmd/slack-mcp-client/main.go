@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	flag "github.com/spf13/pflag"
 	"github.com/tmc/langchaingo/llms"
 
 	"github.com/tuannvm/slack-mcp-client/internal/common"
